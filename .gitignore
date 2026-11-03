@@ -1,0 +1,27 @@
+# Neo4j starter project
+# Local data and logs when you bind-mount the server directories
+data/
+logs/
+import/
+plugins/
+*.dump
+*.backup
+.neo4j_history
+
+# Docs tooling
+node_modules/
+.lycheecache
+
+# Editors and OS
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+.DS_Store
+Thumbs.db
+
+# Env files (never commit secrets)
+.env
+.env.*
+!.env.example

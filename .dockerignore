@@ -1,0 +1,10 @@
+.git
+.github
+**/node_modules
+public
+*.md
+!README.md
+Dockerfile
+.dockerignore
+data/
+logs/

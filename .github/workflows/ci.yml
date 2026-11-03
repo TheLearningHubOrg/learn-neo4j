@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEO4J_IMAGE: neo4j:2026.10-community
+  # HTTP port of the image: EXPOSEd first in the Dockerfile and published by the docker job.
+  APP_PORT: "7474"
+  HEALTH_PATH: /
+
+jobs:
+  test:
+    name: Lint and run the Cypher tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: ShellCheck the test runner
+        run: shellcheck --severity=warning scripts/*.sh
+
+      # The repo is mounted read-only and the tests run with the cypher-shell
+      # that ships inside the image, so the client always matches the server.
+      - name: Start Neo4j
+        run: |
+          docker run -d --name neo4j \
+            -e NEO4J_AUTH=neo4j/ci-password-123 \
+            -v "$PWD:/work:ro" \
+            "$NEO4J_IMAGE"
+          for _ in $(seq 1 60); do
+            if docker exec neo4j cypher-shell -u neo4j -p ci-password-123 'RETURN 1' >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs neo4j
+          exit 1
+
+      - name: Show the server version
+        run: >-
+          docker exec neo4j cypher-shell -u neo4j -p ci-password-123 --format plain
+          'CALL dbms.components() YIELD versions, edition RETURN versions, edition'
+
+      - name: Load the starter graph and run the tests
+        run: docker exec -e NEO4J_PASSWORD=ci-password-123 neo4j bash /work/scripts/run-tests.sh
+
+      - name: Show Neo4j logs on failure
+        if: failure()
+        run: docker logs neo4j
+
+  docker:
+    name: Image builds, starts seeded and answers on HTTP
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+
+      # The verify stage runs the same Cypher tests inside the build.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: guide-app:ci
+
+      - name: Start the container and wait until it is healthy
+        run: |
+          docker run -d --name guide-app -e NEO4J_AUTH=neo4j/ci-password-123 \
+            -p "${APP_PORT}:${APP_PORT}" guide-app:ci
+          for _ in $(seq 1 45); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' guide-app)"
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          echo "container health: $status"
+          [ "$status" = healthy ]
+
+      - name: Smoke-test the health path and the Query API
+        run: |
+          curl -fsS "http://localhost:${APP_PORT}${HEALTH_PATH}"
+          body='{"statement": "MATCH (p:Person) RETURN count(p) AS people"}'
+          result="$(curl -fsS -u neo4j:ci-password-123 \
+            -H 'Content-Type: application/json' -d "$body" \
+            "http://localhost:${APP_PORT}/db/neo4j/query/v2")"
+          echo "$result"
+          echo "$result" | grep -q '"values":\[\[8\]\]'
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs guide-app
